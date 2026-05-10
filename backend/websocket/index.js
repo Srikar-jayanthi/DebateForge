@@ -1,0 +1,1143 @@
+'use strict';
+
+const { Server } = require('socket.io');
+const jwt        = require('jsonwebtoken');
+const { Debate, User } = require('../models');
+const { streamDebateResponse, buildSystemPrompt, trimHistory, translateText, LANGUAGE_NAMES } = require('../services/llm.service');
+const DebateFormatEngine = require('../services/formatEngine.service');
+const axios      = require('axios');
+const redisClient = require('../config/redis');
+const { SCORE_THRESHOLDS, MAX_ROUNDS } = require('../config/constants');
+const { finalizeDebateStats } = require('../controllers/debate.controller');
+const initMultiplayerWS = require('./multiplayer');
+
+// Export immediately to prevent CommonJS circular dependency issues
+module.exports = initWebSocket;
+
+function normalizeList(items, limit = 25) {
+  if (!Array.isArray(items)) return [];
+  const seen = new Set();
+  const cleaned = [];
+
+  for (const item of items) {
+    const value = String(item || '').replace(/\s+/g, ' ').trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cleaned.push(value);
+    if (cleaned.length >= limit) break;
+  } 
+
+  return cleaned;
+}
+
+function normalizeLangIso(lang) {
+  const raw = String(lang || '').trim();
+  if (!raw) return 'en';
+  // BCP-47 -> iso-639-1 (en-US -> en)
+  return raw.split('-')[0].toLowerCase();
+}
+
+function normalizeOptionalLang(lang) {
+  const raw = String(lang || '').trim().toLowerCase();
+  if (!raw || raw === 'auto' || raw === 'detect' || raw === 'detected') {
+    return null;
+  }
+  return normalizeLangIso(raw);
+}
+
+function detectLanguageFromText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return 'en';
+
+  console.log(`[LanguageDetection] Analyzing text (first 20 chars): "${raw.slice(0, 20)}..."`);
+
+  if (/[\u0C00-\u0C7F]/.test(raw)) {
+    console.log('[LanguageDetection] Result: te (Telugu)');
+    return 'te';
+  }
+  // ... rest of the detection
+  if (/[\u0B80-\u0BFF]/.test(raw)) return 'ta'; // Tamil
+  if (/[\u0C80-\u0CFF]/.test(raw)) return 'kn'; // Kannada
+  if (/[\u0D00-\u0D7F]/.test(raw)) return 'ml'; // Malayalam
+  if (/[\u0900-\u097F]/.test(raw)) return 'hi'; // Devanagari → Hindi/Marathi fallback
+  if (/[\u0980-\u09FF]/.test(raw)) return 'bn'; // Bengali
+  if (/[\u0A80-\u0AFF]/.test(raw)) return 'gu'; // Gujarati
+  if (/[\u0A00-\u0A7F]/.test(raw)) return 'pa'; // Gurmukhi Punjabi
+  if (/[\u0600-\u06FF]/.test(raw)) return 'ur'; // Arabic script → Urdu fallback
+
+  return 'en';
+}
+
+function resolveActiveLanguage(session, detectedLanguage = null) {
+  const preferred = normalizeOptionalLang(session?.preferredLang);
+  if (preferred) return preferred;
+
+  const detected = normalizeOptionalLang(detectedLanguage || session?.detectedLanguage);
+  if (detected) return detected;
+
+  const current = normalizeOptionalLang(session?.currentLanguage);
+  return current || 'en';
+}
+
+function shouldTranslateFallback(text, targetLang) {
+  if (!targetLang || targetLang === 'en') return false;
+
+  const scriptDetectableLangs = new Set(['te', 'ta', 'kn', 'ml', 'hi', 'bn', 'gu', 'pa', 'ur', 'ar', 'zh', 'ja', 'ko']);
+  if (scriptDetectableLangs.has(targetLang)) {
+    return detectLanguageFromText(text) !== targetLang;
+  }
+
+  // For Latin-script languages, only fall back when the output looks purely ASCII,
+  // which usually means the model answered in English.
+  return /^[\x00-\x7F\s.,!?'"%\-:;()0-9/]+$/.test(String(text || '').trim());
+}
+
+function buildImprovementSummary(areasToImprove, grammarMistakes) {
+  const topAreas = areasToImprove.slice(0, 2);
+  const topGrammar = grammarMistakes.slice(0, 2);
+  const segments = [];
+
+  if (topAreas.length > 0) {
+    segments.push(`Main debate weaknesses: ${topAreas.join('; ')}`);
+  }
+  if (topGrammar.length > 0) {
+    segments.push(`Grammar issues to fix: ${topGrammar.join('; ')}`);
+  }
+
+  return segments.join(' | ') || 'Keep sharpening your rebuttals, evidence, and clarity.';
+}
+
+async function persistReportCard(userId, judgeResponse) {
+  const user = await User.findById(userId).select('targetImprovements grammarMistakes');
+  if (!user) return { savedFocusAreas: [], savedGrammarPatterns: [] };
+
+  const mergedFocusAreas = normalizeList([
+    ...(user.targetImprovements || []),
+    ...(judgeResponse.areasToImprove || []),
+  ], 50);
+  const mergedGrammarPatterns = normalizeList([
+    ...(user.grammarMistakes || []),
+    ...(judgeResponse.grammarMistakes || []),
+  ], 50);
+
+  user.targetImprovements = mergedFocusAreas;
+  user.grammarMistakes = mergedGrammarPatterns;
+  await user.save();
+
+  return {
+    savedFocusAreas: mergedFocusAreas,
+    savedGrammarPatterns: mergedGrammarPatterns,
+  };
+}
+
+function sanitizeJudgeResponse(judgeResponse, fallbackFeedback = '') {
+  const areasToImprove = normalizeList(judgeResponse?.areasToImprove);
+  const grammarMistakes = normalizeList(judgeResponse?.grammarMistakes);
+  const fallacies = normalizeList(judgeResponse?.fallacies);
+  const userWeaknesses = String(judgeResponse?.userWeaknesses || '').trim();
+  
+  let userScore = Number(judgeResponse?.userScore || 50);
+  let aiScore = Number(judgeResponse?.aiScore || 50);
+  const winner = ['user', 'ai', 'draw'].includes(judgeResponse?.winner) ? judgeResponse.winner : 'draw';
+
+  const reportCardHeadline = String(
+    judgeResponse?.reportCardHeadline ||
+    (areasToImprove[0]
+      ? `Your next biggest upgrade is: ${areasToImprove[0]}`
+      : 'Solid effort, but there are still clear weaknesses to tighten up.')
+  ).trim();
+
+  return {
+    userScore,
+    aiScore,
+    winner,
+    feedback: String(judgeResponse?.feedback || fallbackFeedback || 'Good effort, but your case still needs tighter execution.').trim(),
+    userStrengths: String(judgeResponse?.userStrengths || 'You showed effort and stayed engaged.').trim(),
+    userWeaknesses: userWeaknesses || (areasToImprove[0] || 'Your rebuttals and clarity still need more discipline.'),
+    areasToImprove,
+    grammarMistakes,
+    fallacies,
+    reportCardHeadline,
+    improvementSummary: buildImprovementSummary(areasToImprove, grammarMistakes),
+  };
+}
+
+/* ── WebSocket rate limiter ── */
+const WS_RATE_LIMITS = {
+  join_debate:        { max: 20,  windowMs: 60000 },   // 20 joins per min
+  audio_chunk:        { max: 600, windowMs: 60000 },   // 600 chunks per min (10/sec)
+  audio_end:          { max: 60, windowMs: 60000 },    // 60 per min
+  transcript_direct:  { max: 60, windowMs: 60000 },    // 60 per min
+  set_language:       { max: 60, windowMs: 60000 },    // 60 per min
+  end_debate:         { max: 20, windowMs: 60000 },    // 20 per min
+};
+
+function wsRateLimiter(socket, eventName) {
+  if (!WS_RATE_LIMITS[eventName]) return true; // No limit defined = allow
+
+  if (!socket._rateLimits) socket._rateLimits = {};
+  if (!socket._rateLimits[eventName]) {
+    socket._rateLimits[eventName] = { count: 0, resetAt: Date.now() + WS_RATE_LIMITS[eventName].windowMs };
+  }
+
+  const limit = socket._rateLimits[eventName];
+  const now = Date.now();
+
+  // Reset window if expired
+  if (now > limit.resetAt) {
+    limit.count = 0;
+    limit.resetAt = now + WS_RATE_LIMITS[eventName].windowMs;
+  }
+
+  limit.count++;
+
+  if (limit.count > WS_RATE_LIMITS[eventName].max) {
+    socket.emit('error', { message: `Rate limit exceeded for ${eventName}. Slow down.` });
+    return false;
+  }
+
+  return true;
+}
+
+/* ── Track active connections per user ── */
+const userConnections = new Map(); // userId → Set<socketId>
+const MAX_CONNECTIONS_PER_USER = 5;
+
+/* ─────────────────────────────────────────────────────────────
+   Entry point — attach Socket.IO to the HTTP server
+───────────────────────────────────────────────────────────── */
+function initWebSocket(server) {
+  const io = new Server(server, {
+    cors: {
+      origin: (process.env.FRONTEND_URL || 'http://localhost:3000').split(',').map(o => o.trim()),
+      credentials: true,
+    },
+    maxHttpBufferSize: 1e7,  // 10 MB (audio chunks)
+    pingTimeout: 30000,      // Disconnect idle sockets faster
+    pingInterval: 15000,
+  });
+
+  /* ── Initialize multiplayer namespace ── */
+  initMultiplayerWS(io);
+
+  /* ── JWT auth middleware ── */
+  io.use((socket, next) => {
+    const token = socket.handshake.auth?.token;
+    if (!token) return next(new Error('No token'));
+    try {
+      socket.user = jwt.verify(token, process.env.JWT_SECRET);
+      next();
+    } catch {
+      next(new Error('Invalid token'));
+    }
+  });
+
+  /* ── Connection limiter middleware ── */
+  io.use((socket, next) => {
+    const userId = socket.user?.id;
+    if (!userId) return next(new Error('No user'));
+
+    const conns = userConnections.get(userId) || new Set();
+    if (conns.size >= MAX_CONNECTIONS_PER_USER) {
+      return next(new Error('Too many connections. Close other tabs.'));
+    }
+    conns.add(socket.id);
+    userConnections.set(userId, conns);
+    next();
+  });
+
+  /* ── Connection handler ── */
+  io.on('connection', (socket) => {
+    // eslint-disable-next-line no-console
+    console.log(`[WS] User connected: ${socket.user.username}`);
+    socket._turnInFlight = false;
+
+    /* ────────────────────────────────────────
+       join_debate
+    ─────────────────────────────────────── */
+    socket.on('join_debate', async ({ debateId, tzOffsetMinutes, preferredLang } = {}) => {
+      if (!wsRateLimiter(socket, 'join_debate')) return;
+      // Also reset turnInFlight on every join so reconnects don't stay blocked.
+      socket._turnInFlight = false;
+      console.log(`[WS] INCOMING: join_debate for debateId: ${debateId} from user: ${socket.user.username}`);
+      try {
+        const debate = await Debate.findOne({
+          _id:    debateId,
+          userId: socket.user.id,
+        });
+        if (!debate) {
+          console.error(`[WS] ERROR: Debate ${debateId} not found for user ${socket.user.id}`);
+          return socket.emit('error', { message: 'Debate not found' });
+        }
+
+        const preferredLangIso = normalizeOptionalLang(preferredLang);
+
+        /* ── Check for existing session (reconnect case) ── */
+        const existingRaw = await redisClient.get(`session:${debateId}`);
+        if (existingRaw) {
+          const existing = JSON.parse(existingRaw);
+          if (existing.userId === socket.user.id) {
+            // Restore existing session — do NOT overwrite round/history.
+            // Just update language and tzOffset if they changed.
+            if (preferredLang !== undefined) {
+              existing.preferredLang = preferredLangIso;
+              existing.currentLanguage = resolveActiveLanguage(existing, preferredLangIso);
+            }
+            if (typeof tzOffsetMinutes === 'number') {
+              existing.tzOffset = tzOffsetMinutes;
+            }
+            await redisClient.setex(`session:${debateId}`, 3600, JSON.stringify(existing));
+            socket.join(debateId);
+            console.log(`[WS] RECONNECT: Restored existing session for debate ${debateId} at round ${existing.round}`);
+            socket.emit('debate_joined', {
+              topic:      debate.topicSnapshot,
+              userSide:   debate.userSide,
+              aiPosition: existing.aiPosition,
+              difficulty: debate.difficulty,
+              format:     debate.format || 'freeform',
+            });
+            return;
+          }
+        }
+
+        /* ── No existing session — create a fresh one ── */
+        const user               = await User.findById(socket.user.id);
+        const fallacyProfile     = Object.fromEntries(user.fallacyProfile || new Map());
+        const targetImprovements = user.targetImprovements || [];
+        const grammarMistakes    = user.grammarMistakes || [];
+        const aiPosition         = debate.userSide === 'for' ? 'against' : 'for';
+        const tzOffset           = typeof tzOffsetMinutes === 'number' ? tzOffsetMinutes : 0;
+
+        /* ── Fetch coaching plan from ML memory service ── */
+        let coachingPlan = null;
+        try {
+          coachingPlan = await callMLService(`/memory/coaching-plan/${socket.user.id}`, null, 'GET');
+        } catch { /* non-critical */ }
+
+        /* ── Format Engine: initialize phase state ── */
+        const debateFormat = debate.format || 'freeform';
+        const phaseInfo    = DebateFormatEngine.getCurrentPhaseInfo(debateFormat, 0);
+
+        const sessionState = {
+          debateId,
+          userId:              socket.user.id,
+          topic:               debate.topicSnapshot,
+          userSide:            debate.userSide,
+          aiPosition,
+          difficulty:          debate.difficulty,
+          persona:             debate.persona || 'balanced',
+          round:               1,
+          conversationHistory: [],
+          userFallacyProfile:  fallacyProfile,
+          targetImprovements,
+          grammarMistakes,
+          weaknessSummary:     '',
+          coachingPlan,
+          audioBuffer:         [],
+          // Addition 6: Format state
+          format:              debateFormat,
+          phaseIndex:          0,
+          roundsInPhase:       0,
+          tzOffset, // minutes, where local = UTC + tzOffsetMinutes
+          preferredLang:       preferredLangIso,
+          detectedLanguage:    null,
+          currentLanguage:     preferredLangIso || 'en',
+        };
+
+        await redisClient.setex(
+          `session:${debateId}`,
+          3600,
+          JSON.stringify(sessionState)
+        );
+
+        socket.join(debateId);
+        console.log(`[WS] SUCCESS: User joined debate channel ${debateId}`);
+        socket.emit('debate_joined', {
+          topic:      debate.topicSnapshot,
+          userSide:   debate.userSide,
+          aiPosition,
+          difficulty: debate.difficulty,
+          format:     debateFormat,
+        });
+
+        /* ── Emit initial phase info for format debates ── */
+        if (debateFormat !== 'freeform') {
+          socket.emit('phase_update', {
+            phase:       phaseInfo.phaseKey,
+            phaseName:   phaseInfo.phaseName,
+            timeLimit:   phaseInfo.timeLimit,
+            instruction: phaseInfo.instruction,
+            phaseNumber: phaseInfo.phaseNumber,
+            totalPhases: phaseInfo.totalPhases,
+            phases:      DebateFormatEngine.getPhaseList(debateFormat),
+          });
+        }
+      } catch (e) {
+        console.error(`[WS] ERROR in join_debate:`, e);
+        socket.emit('error', { message: e.message });
+      }
+    });
+
+    /* ────────────────────────────────────────
+       set_language — client UI override
+    ─────────────────────────────────────── */
+    socket.on('set_language', async ({ debateId, lang } = {}) => {
+      if (!wsRateLimiter(socket, 'set_language')) return;
+      try {
+        const sessionRaw = await redisClient.get(`session:${debateId}`);
+        if (!sessionRaw) return; // Silent return to avoid race condition during startup
+
+        const session = JSON.parse(sessionRaw);
+        if (session.userId !== socket.user.id) {
+          return socket.emit('error', { message: 'Unauthorized' });
+        }
+
+        const iso = normalizeOptionalLang(lang);
+        session.preferredLang = iso;
+        session.currentLanguage = resolveActiveLanguage(session, session.detectedLanguage);
+
+        await redisClient.setex(`session:${debateId}`, 3600, JSON.stringify(session));
+      } catch (e) {
+        socket.emit('error', { message: e.message });
+      }
+    });
+
+    /* ────────────────────────────────────────
+       audio_chunk — buffer incoming PCM/webm
+    ─────────────────────────────────────── */
+    socket.on('audio_chunk', ({ debateId, chunk }) => {
+      if (!wsRateLimiter(socket, 'audio_chunk')) return;
+      try {
+        if (!socket.audioBuffer) socket.audioBuffer = [];
+        socket.audioBuffer.push(Buffer.from(chunk));
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error('[WS] audio_chunk error:', e.message);
+      }
+    });
+
+
+    /* ────────────────────────────────────────
+       audio_end — transcribe + process turn
+    ─────────────────────────────────────── */
+    socket.on('audio_end', async ({ debateId, transcriptFallback } = {}) => {
+      if (!wsRateLimiter(socket, 'audio_end')) return;
+      if (socket._turnInFlight) {
+        return socket.emit('error', { message: 'Still processing your previous turn. Please wait.' });
+      }
+      console.log(`[WS] INCOMING: audio_end for debate: ${debateId}`);
+      const sessionRaw = await redisClient.get(`session:${debateId}`);
+      if (!sessionRaw) return; // Silent return to avoid race condition on startup
+      const session = JSON.parse(sessionRaw);
+
+      /* ── Ownership check: prevent IDOR ── */
+      if (session.userId !== socket.user.id) {
+        return socket.emit('error', { message: 'Unauthorized' });
+      }
+      
+      const chunks = socket.audioBuffer || [];
+      socket.audioBuffer = []; // Clear current buffer
+      
+      if (chunks.length === 0) {
+        console.log(`[WS] WARNING: audio_end received but socket buffer was empty`);
+        return;
+      }
+
+      session.audioBuffer = chunks;
+      socket._turnInFlight = true;
+      try {
+        await processTurn(socket, session, debateId, String(transcriptFallback || '').trim());
+      } finally {
+        socket._turnInFlight = false;
+      }
+    });
+
+    /* ────────────────────────────────────────
+       transcript_direct — fallback (no MediaRecorder)
+    ─────────────────────────────────────── */
+    socket.on('transcript_direct', async ({ debateId, text }) => {
+      if (!wsRateLimiter(socket, 'transcript_direct')) return;
+      if (socket._turnInFlight) {
+        return socket.emit('error', { message: 'Still processing your previous turn. Please wait.' });
+      }
+      console.log(`[WS] INCOMING: transcript_direct. Debate: ${debateId}, Text length: ${text?.length || 0}`);
+      const sessionRaw = await redisClient.get(`session:${debateId}`);
+      if (!sessionRaw) {
+         console.log(`[WS] ERROR: Ignoring transcript_direct because session missing from Redis`);
+         return;
+      }
+      const session = JSON.parse(sessionRaw);
+
+      /* ── Ownership check: prevent IDOR ── */
+      if (session.userId !== socket.user.id) {
+        return socket.emit('error', { message: 'Unauthorized' });
+      }
+
+      if (!String(text || '').trim()) {
+        return socket.emit('error', { message: 'Could not transcribe. Please try again.' });
+      }
+
+      const detectedLanguage = detectLanguageFromText(text) || session.detectedLanguage || session.currentLanguage || 'en';
+      session.detectedLanguage = detectedLanguage;
+      session.currentLanguage = resolveActiveLanguage(session, detectedLanguage);
+
+      socket.emit('transcript_final', { text, language: session.currentLanguage });
+      socket._turnInFlight = true;
+      try {
+        await processTranscript(socket, session, debateId, text);
+      } finally {
+        socket._turnInFlight = false;
+      }
+    });
+
+    /* ────────────────────────────────────────
+       end_debate — manual end by user
+    ─────────────────────────────────────── */
+    socket.on('end_debate', async ({ debateId, tzOffsetMinutes }) => {
+      if (!wsRateLimiter(socket, 'end_debate')) return;
+      try {
+        const sessionRaw = await redisClient.get(`session:${debateId}`);
+        if (!sessionRaw) return;
+
+        /* ── Ownership check on session ── */
+        const session = JSON.parse(sessionRaw);
+        if (session.userId !== socket.user.id) {
+          return socket.emit('error', { message: 'Unauthorized' });
+        }
+
+        /* Store user timezone offset for streak calculation */
+        const tzOffset = typeof tzOffsetMinutes === 'number' ? tzOffsetMinutes : 0;
+
+        /* ── Ownership check on debate document ── */
+        const debate = await Debate.findOne({ _id: debateId, userId: socket.user.id });
+        if (!debate) {
+          socket.emit('error', { message: 'Debate not found' });
+          return;
+        }
+
+        if (debate.arguments.length >= 2) {
+          let isForfeit = false;
+          // Determine if user ended debate before completing required rounds/phases
+          if (session.format === 'freeform' && session.round <= MAX_ROUNDS) {
+            isForfeit = true;
+          } else if (session.format !== 'freeform' && session.phaseIndex !== -1) {
+            isForfeit = true;
+          }
+          await runJudgeScoring(socket, session, debateId, isForfeit, tzOffset);
+          await redisClient.del(`session:${debateId}`);
+          return;
+        }
+        /* Too few arguments for a proper judge evaluation — instant forfeit */
+        const winner = 'ai';
+        const result = await finalizeDebateStats(socket.user.id, debateId, winner, 0, tzOffset);
+        socket.emit('debate_ended', {
+          winner,
+          userFinalScore: result.avgScore,
+          forfeit: true,
+          message: 'You forfeited by leaving too early. Complete all rounds to get a fair judgment!',
+        });
+        await redisClient.del(`session:${debateId}`);
+      } catch (e) {
+        socket.emit('error', { message: e.message });
+      }
+    });
+
+
+    socket.on('disconnect', () => {
+      // Clean up connection tracking
+      const userId = socket.user?.id;
+      if (userId && userConnections.has(userId)) {
+        const conns = userConnections.get(userId);
+        conns.delete(socket.id);
+        if (conns.size === 0) userConnections.delete(userId);
+      }
+      // eslint-disable-next-line no-console
+      console.log(`[WS] User disconnected: ${socket.user.username}`);
+    });
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   processTurn — transcribe audio then hand off to processTranscript
+═══════════════════════════════════════════════════════════════ */
+async function processTurn(socket, session, debateId, transcriptFallback = '') {
+  try {
+    /* Reconstruct audio blob from stored chunks */
+    const storedChunks = session.audioBuffer.map((b) => Buffer.from(b));
+    const audioBuffer  = Buffer.concat(storedChunks);
+    session.audioBuffer = [];  // clear to save Redis space
+
+    let transcript = '';
+    let detectedLanguage = session.detectedLanguage || session.currentLanguage || 'en';
+
+    /* Try ML transcription first; gracefully fall back to browser transcript */
+    if (audioBuffer.length > 1000) {
+      try {
+        const result = await transcribeAudio(audioBuffer, session.topic);
+        transcript   = result.text;
+        detectedLanguage = result.language || detectedLanguage;
+      } catch (mlErr) {
+        // ML service is unreachable — fall through to transcriptFallback
+        console.warn(`[WS] ML transcription failed (${mlErr.message}), using browser fallback`);
+      }
+    }
+
+    if (!transcript.trim() && transcriptFallback) {
+      transcript = transcriptFallback;
+      detectedLanguage = detectLanguageFromText(transcriptFallback) || detectedLanguage;
+      console.log(`[WS] Using transcript fallback for debate ${debateId} | lang=${detectedLanguage}`);
+    }
+
+    if (!transcript.trim()) {
+      socket.emit('error', { message: 'Could not transcribe audio. Please speak louder or type your argument.' });
+      return;
+    }
+
+    /* Store detected language on session for AI response language */
+    session.detectedLanguage = detectedLanguage;
+    session.currentLanguage = resolveActiveLanguage(session, detectedLanguage);
+
+    socket.emit('transcript_final', { text: transcript, language: session.currentLanguage });
+    await processTranscript(socket, session, debateId, transcript);
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('[WS] processTurn error:', e);
+    socket.emit('error', { message: 'Processing error. Please try again.' });
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   processTranscript — ML pipeline → GPT-4 stream → TTS stream
+═══════════════════════════════════════════════════════════════ */
+  async function processTranscript(socket, session, debateId, transcript) {
+    if (socket._processingTranscript) return;
+    socket._processingTranscript = true;
+    try {
+    session.currentLanguage = resolveActiveLanguage(session);
+    socket.emit('ai_thinking', { language: session.currentLanguage });
+
+    const historyCtx = session.conversationHistory.slice(-4).map((m) => m.content);
+
+    /* ── 1. Run ML tasks in parallel (non-blocking) ── */
+    let fallacyResult = {};
+    const fallacyPromise = callMLService('/fallacy/detect', {
+      argument: transcript,
+      context:  historyCtx,
+      user_id:  session.userId,
+    }).then((res) => {
+      if (res?.detected) socket.emit('fallacy_detected', res);
+      if (res) fallacyResult = res;
+    }).catch(err => console.error('[WS] Fallacy error:', err.message));
+
+    let scoresResult = {};
+    const scorerPromise = callMLService('/scorer/score', {
+      argument:    transcript,
+      topic:       session.topic,
+      context:     historyCtx,
+      turn_number: session.round,
+    }).then((res) => {
+      if (res) {
+        console.log(`[WS] SCORER RESULT for turn ${session.round}:`, JSON.stringify(res));
+        socket.emit('scores_update', res);
+        scoresResult = res;
+      }
+    }).catch(err => console.error('[WS] Scorer error:', err.message));
+
+    const weaknessPromise = callMLService(`/memory/weaknesses/${session.userId}`, null, 'GET')
+      .then((res) => {
+        if (res?.weakness_summary) session.weaknessSummary = res.weakness_summary;
+      }).catch(err => console.error('[WS] Weakness error:', err.message));
+
+    // ensure errors don't crash
+    Promise.allSettled([fallacyPromise, scorerPromise, weaknessPromise]);
+
+    /* ── 5. Append user turn to history ── */
+    session.conversationHistory.push({ role: 'user', content: transcript });
+    session.conversationHistory = trimHistory(session.conversationHistory);
+
+    /* ── 5.5 Inject phase-specific prompt (Addition 6) ── */
+    const phasePrompt = DebateFormatEngine.getPhaseSystemPromptAddition(
+      session.format || 'freeform',
+      session.phaseIndex || 0,
+      session.userSide
+    );
+    if (phasePrompt) {
+      // Temporarily inject phase context into session for buildSystemPrompt
+      session._phasePromptAddition = phasePrompt;
+    }
+
+    /* ── 6. Stream LLM + sentence-level TTS (with 45s timeout) ── */
+    let fullAiText    = '';
+    let cleanAiText   = '';
+    let sentenceBuffer = '';
+    let streamTimedOut = false;
+
+    const targetLang = resolveActiveLanguage(session);
+    const turnId = `turn-${session.round}-${Date.now()}`;
+    session._currentTurnId = turnId;
+
+    // *** CRITICAL: Suppress raw English streaming for non-English debates ***
+    // The LLM (llama3) generates primarily in English. For non-English targets,
+    // we MUST NOT stream raw chunks to the UI — the user would see English text.
+    // Instead, show a single placeholder bubble. The final translated text is
+    // delivered via ai_turn_complete.
+    const suppressRawStream = !!(targetLang && targetLang !== 'en');
+
+    if (suppressRawStream) {
+      socket.emit('ai_text_chunk', { text: '\u2026', isPlaceholder: true, turnId });
+    }
+
+    // Strip parenthetical meta-notes Ollama tends to add e.g. "(Note: I've used the APA study...)"
+    function sanitizeAiChunk(text) {
+      return text
+        .replace(/\([^)]{0,300}\)/g, ' ')   // remove (Note: ...) style asides
+        .replace(/\[[^\]]{0,300}\]/g, ' ')   // remove [Note: ...] style asides
+        .replace(/\s{2,}/g, ' ');            // collapse double spaces
+    }
+
+    const streamTimeout = setTimeout(() => { streamTimedOut = true; }, 60000);
+    try {
+      for await (const chunk of streamDebateResponse(session, transcript)) {
+        if (streamTimedOut) {
+          console.warn('[WS] LLM stream exceeded 45s timeout, aborting');
+          break;
+        }
+        fullAiText += chunk; // keep raw text for conversation history
+        const cleanChunk = sanitizeAiChunk(chunk);
+        cleanAiText += cleanChunk;
+        sentenceBuffer += cleanChunk;
+
+        // *** Only stream raw chunks when language is English ***
+        if (!suppressRawStream && cleanChunk.trim()) {
+          socket.emit('ai_text_chunk', { text: cleanChunk, turnId });
+        }
+
+        // *** Only do sentence-level TTS for English ***
+        // For non-English, TTS happens AFTER translation below.
+        if (!suppressRawStream && /[.!?]\s*$/.test(sentenceBuffer.trim())) {
+          await streamTTSToSocket(socket, sentenceBuffer.trim());
+          sentenceBuffer = '';
+        }
+      }
+    } finally {
+      clearTimeout(streamTimeout);
+    }
+
+    // Flush trailing English TTS (only for English debates)
+    if (!suppressRawStream && sentenceBuffer.trim()) {
+      await streamTTSToSocket(socket, sentenceBuffer.trim());
+    }
+
+
+    // Clean up temp phase prompt
+    delete session._phasePromptAddition;
+
+    /* ── 7. Append AI turn to history ── */
+    session.conversationHistory.push({ role: 'assistant', content: fullAiText });
+
+    /* ── 8. Persist updated session and unblock the UI immediately ── */
+    session.round++;
+
+    /* ── 10.5 Phase advancement (Addition 6) ── */
+    const fmt = session.format || 'freeform';
+    if (fmt !== 'freeform') {
+      session.roundsInPhase = (session.roundsInPhase || 0) + 1;
+
+      if (DebateFormatEngine.shouldAdvancePhase(fmt, session.phaseIndex || 0, session.roundsInPhase)) {
+        const nextIdx = DebateFormatEngine.getNextPhaseIndex(fmt, session.phaseIndex || 0);
+
+        if (nextIdx === -1) {
+          // Debate ended
+          session.phaseIndex = -1;
+        } else {
+          session.phaseIndex = nextIdx;
+          session.roundsInPhase = 0;
+
+          const nextInfo = DebateFormatEngine.getCurrentPhaseInfo(fmt, nextIdx);
+
+          if (nextInfo.phaseKey === 'judging') {
+            // Trigger AI judge scoring
+            await runJudgeScoring(socket, session, debateId, false, session.tzOffset || 0);
+          } else {
+            socket.emit('phase_update', {
+              phase:       nextInfo.phaseKey,
+              phaseName:   nextInfo.phaseName,
+              timeLimit:   nextInfo.timeLimit,
+              instruction: nextInfo.instruction,
+              phaseNumber: nextInfo.phaseNumber,
+              totalPhases: nextInfo.totalPhases,
+              phases:      DebateFormatEngine.getPhaseList(fmt),
+            });
+          }
+        }
+      }
+    }
+
+    let finalText = (cleanAiText || fullAiText).trim();
+
+    // *** ALWAYS translate for non-English debates ***
+    // No conditional check — if the user selected Telugu, the output MUST be Telugu.
+    if (targetLang && targetLang !== 'en') {
+      socket.emit('ai_translating', { language: LANGUAGE_NAMES[targetLang] || targetLang });
+      try {
+        // Increase timeout for slow translations (e.g. Telugu)
+        const translated = await translateText(finalText, targetLang);
+        if (translated && translated.trim().length > 0) {
+          finalText = translated.trim();
+        }
+      } catch (e) {
+        console.error('[WS] Translation failed, sending original response:', e.message); // eslint-disable-line no-console
+      }
+      // Send translated TTS (non-English debates only get TTS after translation)
+      await streamTTSToSocket(socket, finalText);
+    }
+
+    session.conversationHistory[session.conversationHistory.length - 1] = {
+      role: 'assistant',
+      content: finalText,
+    };
+
+    await redisClient.setex(`session:${debateId}`, 3600, JSON.stringify(session));
+
+    /* ── 9. Signal turn complete ── */
+    socket.emit('ai_turn_complete', {
+      fullText: finalText,
+      round: session.round,
+      detectedLanguage: targetLang || session.currentLanguage || session.detectedLanguage || 'en',
+      turnId: session._currentTurnId || null,
+    });
+
+    // Clear the turnId after use
+    delete session._currentTurnId;
+
+    Promise.allSettled([fallacyPromise, scorerPromise]).then(async () => {
+      try {
+        await saveTurnToMongo(debateId, transcript, finalText, session.round - 1, scoresResult, fallacyResult);
+
+        if (scoresResult && (scoresResult.logic || scoresResult.evidence || scoresResult.clarity)) {
+          User.findByIdAndUpdate(session.userId, {
+            $inc: {
+              totalLogicScore:    scoresResult.logic    || 0,
+              totalEvidenceScore: scoresResult.evidence || 0,
+              totalClarityScore:  scoresResult.clarity  || 0,
+              totalScoredTurns:   1,
+            },
+          }).catch(console.error);  // eslint-disable-line no-console
+        }
+
+        callMLService('/memory/store', {
+          user_id:       session.userId,
+          argument_text: transcript,
+          scores:        scoresResult,
+          fallacy_type:  fallacyResult?.fallacy_type || 'no_fallacy',
+          topic:         session.topic,
+          debate_id:     debateId,
+          turn_number:   session.round - 1,
+        }).catch(console.error);  // eslint-disable-line no-console
+      } catch (persistErr) {
+        console.error('[WS] Deferred persistence error:', persistErr); // eslint-disable-line no-console
+      }
+    });
+
+    /* ── 10. Auto-end after MAX_ROUNDS (freeform only) ── */
+    if (fmt === 'freeform' && session.round > MAX_ROUNDS) {
+      // Instead of calculating scores locally, use the unified LLM judge for the Report Card
+      await runJudgeScoring(socket, session, debateId, false, session.tzOffset || 0);
+      await redisClient.del(`session:${debateId}`);
+    }
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('[WS] processTranscript error:', e);
+    const isQuota   = e.message?.startsWith('QUOTA_EXHAUSTED');
+    const isOffline = e.message?.includes('AI service is offline') || e.message?.includes('AI_SERVICE_OFFLINE');
+    let userMessage = 'Error generating AI response. Please try again.';
+    if (isQuota) {
+      userMessage = 'AI rate limit reached. Please wait 1–2 minutes and try again.';
+    } else if (isOffline) {
+      userMessage = 'AI service is currently offline. Please ensure Ollama is running and try again.';
+    }
+    socket.emit('error', { message: userMessage });
+  } finally {
+    socket._processingTranscript = false;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   runJudgeScoring — AI judge evaluates the full debate (Addition 6)
+═══════════════════════════════════════════════════════════════ */
+async function runJudgeScoring(socket, session, debateId, isForfeit = false, tzOffset = 0) {
+  try {
+    const debate = await Debate.findById(debateId);
+    if (!debate) return;
+
+    // Extract fallacies from the debate arguments identified by ML
+    const userFallacies = debate.arguments
+      .filter(a => a.speaker === 'user' && a.fallacy && a.fallacy.detected && a.fallacy.type)
+      .map(a => a.fallacy.type.replace(/_/g, ' '));
+    const uniqueFallacies = [...new Set(userFallacies)];
+
+    let forfeitContext = '';
+    if (isForfeit) {
+      forfeitContext = `\n\nCRITICAL CONTEXT: The user FORFEITED the debate by ending it early before all rounds were completed. Therefore, you MUST declare the "ai" as the winner and heavily penalize the user's score for quitting early.`;
+    }
+
+    const judgePrompt = `You are an impartial debate judge.
+Review this complete debate transcript and score both sides.${forfeitContext}
+
+TOPIC: ${session.topic}
+USER POSITION: ${session.userSide}
+AI POSITION: ${session.aiPosition}
+FORMAT: ${session.format}
+
+FULL TRANSCRIPT:
+${debate.arguments.map(a =>
+  `[${a.speaker.toUpperCase()}]: ${a.content}`
+).join('\n\n')}
+
+Score each debater 0-100 on:
+- Argument quality
+- Use of evidence
+- Rebuttal effectiveness
+- Adherence to debate format
+
+Provide a strict but constructive report card for the user.
+Identify their strongest points, their weakest habits, grammatical mistakes, and the exact things they must improve next time.
+The following fallacies were identified by our ML model during the debate: ${uniqueFallacies.length ? uniqueFallacies.join(', ') : 'None detected'}. You MUST incorporate these into your critique and include them in the JSON output under 'fallacies' if they appear in the transcript.
+Do not soften recurring weaknesses. If the same weakness appears multiple times, stress that they must fix it.
+
+Respond ONLY in this JSON format:
+{
+  "reportCardHeadline": "Brief summary of the user's main issue",
+  "userScore": [Score 0-100],
+  "aiScore": [Score 0-100],
+  "winner": "user" or "ai" or "draw",
+  "feedback": "Concise professional feedback",
+  "userStrengths": "What they did well",
+  "userWeaknesses": "What they failed at",
+  "areasToImprove": ["item1", "item2"],
+  "grammarMistakes": ["error1", "error2"],
+  "fallacies": ["fallacy1"]
+}`;
+
+    // Use the LLM to get judge response
+    let judgeText = '';
+    for await (const chunk of streamDebateResponse(
+      { ...session, round: 1, conversationHistory: [] },
+      judgePrompt
+    )) {
+      judgeText += chunk;
+    }
+
+    // Parse JSON from response
+    let judgeResponse;
+    try {
+      // Try to extract JSON from the response
+      const jsonMatch = judgeText.match(/\{[\s\S]*\}/);
+      const rawJson = jsonMatch ? jsonMatch[0] : judgeText;
+      
+      // Attempt to fix common LLM JSON errors (missing quotes around values)
+      const fixedJson = rawJson.replace(/":\s*([^"{}\[\]\s][^,{}\[\]]*?)\s*(?=[,}])/g, '":"$1"');
+      
+      try {
+        judgeResponse = JSON.parse(fixedJson);
+      } catch (innerErr) {
+        // Fallback to original if fix didn't work
+        judgeResponse = JSON.parse(rawJson);
+      }
+    } catch {
+      console.warn('[WS] Judge JSON parse failed, using heuristic extraction');
+      // If JSON parsing fails entirely, try to extract fields with regex
+      const extract = (regex, fallback) => {
+        const m = judgeText.match(regex);
+        return m ? m[1].trim() : fallback;
+      };
+
+      judgeResponse = {
+        reportCardHeadline: extract(/"reportCardHeadline":\s*"?([^"]+)"?/, isForfeit ? 'Early Exit: Debate Abandoned Prematurely' : 'Debate Complete'),
+        userScore: parseInt(extract(/"userScore":\s*(\d+)/, isForfeit ? '20' : '65')),
+        aiScore: parseInt(extract(/"aiScore":\s*(\d+)/, isForfeit ? '90' : '60')),
+        winner: extract(/"winner":\s*"?(\w+)"?/, isForfeit ? 'ai' : 'user'),
+        feedback: extract(/"feedback":\s*"?([^"]+)"?/, judgeText.slice(0, 500)),
+        userStrengths: extract(/"userStrengths":\s*"?([^"]+)"?/, 'Participated in the debate'),
+        userWeaknesses: extract(/"userWeaknesses":\s*"?([^"]+)"?/, isForfeit ? 'Abandoned the session' : 'Room for improvement'),
+        areasToImprove: [],
+        grammarMistakes: [],
+        fallacies: [],
+      };
+    }
+
+    judgeResponse = sanitizeJudgeResponse(judgeResponse, judgeText);
+
+    const persistedProfile = await persistReportCard(session.userId, judgeResponse);
+
+    // Calculate session-wide averages for the dashboard graph
+    const userArgs = debate.arguments.filter(a => a.speaker === 'user' && a.scores);
+    const avgLogic = userArgs.length ? Math.round(userArgs.reduce((acc, a) => acc + (a.scores.logic || 0), 0) / userArgs.length) : (judgeResponse.userScore || 0);
+    const avgEvid  = userArgs.length ? Math.round(userArgs.reduce((acc, a) => acc + (a.scores.evidence || 0), 0) / userArgs.length) : (judgeResponse.userScore || 0);
+    const avgClar  = userArgs.length ? Math.round(userArgs.reduce((acc, a) => acc + (a.scores.clarity || 0), 0) / userArgs.length) : (judgeResponse.userScore || 0);
+
+    await Debate.findByIdAndUpdate(debateId, {
+      judgeScore: judgeResponse,
+      userFinalScore: judgeResponse.userScore,
+      winner: judgeResponse.winner,
+      scores: {
+        logic:    avgLogic,
+        evidence: avgEvid,
+        clarity:  avgClar,
+      },
+      currentPhase: 'judging',
+      endedAt: new Date(),
+    });
+    
+    // Process final stats (wins, streaks, etc.)
+    const statsResult = await finalizeDebateStats(session.userId, debateId, judgeResponse.winner, 0, tzOffset);
+    const streakResult = statsResult?.streakResult || {};
+
+    // Emit judge results to client
+    socket.emit('judge_verdict', {
+      ...judgeResponse,
+      savedFocusAreas: persistedProfile.savedFocusAreas,
+      savedGrammarPatterns: persistedProfile.savedGrammarPatterns,
+      streak: {
+        new:              streakResult.newStreak        || 0,
+        milestoneReached: streakResult.milestoneReached || null,
+        freezeUsed:       streakResult.freezeUsed       || false,
+      },
+    });
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('[WS] Judge scoring error:', e.message);
+    socket.emit('error', { message: 'Judge scoring failed.' });
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Helper: Whisper transcription
+═══════════════════════════════════════════════════════════════ */
+async function transcribeAudio(audioBuffer, topic) {
+  const FormData = require('form-data');
+  const form     = new FormData();
+
+  form.append('file', audioBuffer, {
+    filename:    'debate.webm',
+    contentType: 'audio/webm',
+  });
+  if (topic) {
+    form.append('topic', topic);
+  }
+
+  const response = await callMLService('/transcription/transcribe', form);
+  return { text: response.text || '', language: response.language || 'en' };
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Helper: TTS (handled client-side via Web Speech API)
+═══════════════════════════════════════════════════════════════ */
+// eslint-disable-next-line no-unused-vars
+async function streamTTSToSocket(socket, text) {
+  if (!text) return;
+  
+  try {
+    const lang = detectLanguageFromText(text);
+    
+    // Use different splitting strategies for English vs others
+    let chunks = [];
+    if (lang === 'en') {
+      // English: Word-based surgical split
+      const words = text.split(/\s+/);
+      let currentChunk = '';
+      for (const word of words) {
+        if ((currentChunk + ' ' + word).length < 190) {
+          currentChunk += (currentChunk ? ' ' : '') + word;
+        } else {
+          if (currentChunk) chunks.push(currentChunk);
+          currentChunk = word;
+        }
+      }
+      if (currentChunk) chunks.push(currentChunk);
+    } else {
+      // Non-English: Sentence-based split to preserve script integrity
+      // Matches sentences ending with various Asian/Indic punctuation or standard ones
+      chunks = text.match(/[^.!?।॥।]+[.!?।॥।]?/g) || [text];
+      // Filter out very small chunks and trim
+      chunks = chunks.map(c => c.trim()).filter(c => c.length > 2);
+    }
+
+    console.log(`[TTS] Processing ${chunks.length} chunks for ${lang}...`);
+    // eslint-disable-next-line no-console
+    console.log(`[TTS] Full text for voice: "${text.slice(0, 50)}...${text.slice(-50)}"`);
+
+    for (const chunk of chunks) {
+      const encodedText = encodeURIComponent(chunk);
+      const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodedText}&tl=${lang}&client=tw-ob`;
+
+      const response = await axios.get(ttsUrl, {
+        responseType: 'arraybuffer',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+      });
+
+      socket.emit('ai_audio_chunk', { 
+        audio: Buffer.from(response.data).toString('base64'),
+        contentType: 'audio/mpeg'
+      });
+    }
+    console.log(`[TTS] All ${chunks.length} chunks sent to client.`);
+  } catch (e) {
+    console.error('[TTS] Universal Error:', e.message);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Helper: ML microservice call
+═══════════════════════════════════════════════════════════════ */
+async function callMLService(path, data, method = 'POST') {
+  const url = `${process.env.ML_SERVICE_URL}${path}`;
+  const config = { timeout: 10000 }; // Prevent infinite hangs if ML service freezes
+
+  if (data && typeof data.getHeaders === 'function') {
+    config.headers = data.getHeaders();
+  }
+
+  const response = method === 'GET'
+    ? await axios.get(url, config)
+    : await axios.post(url, data, config);
+  return response.data;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Helper: Persist one debate turn to MongoDB
+═══════════════════════════════════════════════════════════════ */
+async function saveTurnToMongo(debateId, userText, aiText, round, scores, fallacy) {
+  const userArg = {
+    speaker:     'user',
+    content:     userText,
+    scores: {
+      logic:     scores.logic     ?? null,
+      evidence:  scores.evidence  ?? null,
+      clarity:   scores.clarity   ?? null,
+      overall:   scores.overall   ?? null,
+    },
+    fallacy: {
+      detected:    fallacy.detected    ?? false,
+      type:        fallacy.fallacy_type ?? null,
+      confidence:  fallacy.confidence  ?? null,
+      explanation: fallacy.explanation ?? null,
+    },
+    turnNumber: round,
+  };
+
+  const aiArg = {
+    speaker:    'ai',
+    content:    aiText,
+    turnNumber: round,
+  };
+
+  await Debate.findByIdAndUpdate(debateId, {
+    $push: { arguments: { $each: [userArg, aiArg] } },
+    $inc:  { totalRounds: 1 },
+  });
+}

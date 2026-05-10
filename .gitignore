@@ -1,0 +1,52 @@
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# Environment Variables — NEVER commit secrets
+.env
+.env.*
+*.env
+!.env.example
+
+# MacOS
+.DS_Store
+
+# IDEs
+.idea/
+.vscode/
+# Build
+build/
+dist/
+coverage/
+
+# Logs (may contain leaked secrets in error output)
+*.log
+*.pid
+
+# Uploads (user data)
+backend/uploads/
+
+# Backups and Tests
+node_modules_old_test_backup/
+package-lock.old.json.backup
+backend/test*.js
+frontend/test*.js
+
+
+
+
+render.yaml
+
+# Environment files
+backend/.env
+frontend/.env
+ml/.env
