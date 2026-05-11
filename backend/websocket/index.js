@@ -138,8 +138,12 @@ function sanitizeJudgeResponse(judgeResponse, fallbackFeedback = '') {
   const fallacies = normalizeList(judgeResponse?.fallacies);
   const userWeaknesses = String(judgeResponse?.userWeaknesses || '').trim();
   
-  let userScore = Number(judgeResponse?.userScore || 50);
-  let aiScore = Number(judgeResponse?.aiScore || 50);
+  let userScore = Number(judgeResponse?.userScore);
+  if (isNaN(userScore)) userScore = 50;
+  
+  let aiScore = Number(judgeResponse?.aiScore);
+  if (isNaN(aiScore)) aiScore = 50;
+  
   const winner = ['user', 'ai', 'draw'].includes(judgeResponse?.winner) ? judgeResponse.winner : 'draw';
 
   const reportCardHeadline = String(
@@ -974,9 +978,11 @@ Respond ONLY in this JSON format:
 
     // Calculate session-wide averages for the dashboard graph
     const userArgs = debate.arguments.filter(a => a.speaker === 'user' && a.scores);
-    const avgLogic = userArgs.length ? Math.round(userArgs.reduce((acc, a) => acc + (a.scores.logic || 0), 0) / userArgs.length) : (judgeResponse.userScore || 0);
-    const avgEvid  = userArgs.length ? Math.round(userArgs.reduce((acc, a) => acc + (a.scores.evidence || 0), 0) / userArgs.length) : (judgeResponse.userScore || 0);
-    const avgClar  = userArgs.length ? Math.round(userArgs.reduce((acc, a) => acc + (a.scores.clarity || 0), 0) / userArgs.length) : (judgeResponse.userScore || 0);
+    const fallbackScore = Number(judgeResponse.userScore) || 50;
+    
+    const avgLogic = userArgs.length ? Math.round(userArgs.reduce((acc, a) => acc + (Number(a.scores.logic) || 0), 0) / userArgs.length) : fallbackScore;
+    const avgEvid  = userArgs.length ? Math.round(userArgs.reduce((acc, a) => acc + (Number(a.scores.evidence) || 0), 0) / userArgs.length) : fallbackScore;
+    const avgClar  = userArgs.length ? Math.round(userArgs.reduce((acc, a) => acc + (Number(a.scores.clarity) || 0), 0) / userArgs.length) : fallbackScore;
 
     await Debate.findByIdAndUpdate(debateId, {
       judgeScore: judgeResponse,

@@ -8,6 +8,7 @@ import {
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import StreakBadge from '../components/StreakBadge';
+import ActivityHeatMap from '../components/Dashboard/ActivityHeatMap';
 import { usePushNotifications } from '../hooks/usePushNotifications';
 import '../styles/theme.css';
 import '../styles/dashboard.css';
@@ -151,43 +152,10 @@ export default function DashboardPage() {
   const elo          = profile?.user?.eloRating ?? profile?.elo ?? user?.elo ?? 1000;
   const streakData   = profile?.user?.streak || user?.streak || { current: 0, longest: 0, freezeUsed: false };
 
-  /* ── weekly activity (last 7 live local days from debate history) ── */
-  const weekdayFormatter = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
-  const dateTitleFormatter = new Intl.DateTimeFormat(undefined, {
-    weekday: 'long',
-    month: 'short',
-    day: 'numeric',
-  });
+  // The ActivityHeatMap component handles logic internally now.
 
-  function toLocalYMD(dateLike) {
-    const d = new Date(dateLike);
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-  }
-
-  const today = new Date();
-  const activityDots = Array.from({ length: 7 }, (_, i) => {
-    const day = new Date(today);
-    day.setDate(today.getDate() - (6 - i));
-    const dayStr = toLocalYMD(day);
-    const isActive = history.some((d) => {
-      const debateDate = d.startedAt || d.createdAt;
-      if (!debateDate) return false;
-      return toLocalYMD(debateDate) === dayStr;
-    });
-    const isToday = i === 6;
-    return {
-      label: weekdayFormatter.format(day),
-      title: dateTitleFormatter.format(day),
-      isActive,
-      isToday,
-    };
-  });
-
-  // Fail-safe: if streak is 0 but we have activity today, show 1
-  if (streakData.current === 0 && activityDots[6]?.isActive) {
+  // Fail-safe: if streak is 0 but we have activity in history, show 1
+  if (streakData.current === 0 && history.length > 0) {
     streakData.current = 1;
     if (streakData.longest === 0) streakData.longest = 1;
   }
@@ -271,21 +239,8 @@ export default function DashboardPage() {
           {/* Streak Badge */}
           <StreakBadge streak={streakData} />
 
-          {/* Weekly Activity Grid */}
-          <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 16, padding: 16 }}>
-            <div style={{ fontSize: '0.8rem', fontWeight: 700, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>This Week</div>
-            <div className="activity-grid">
-              {activityDots.map((dot, i) => (
-                <div
-                  key={i}
-                  className={`activity-dot ${dot.isActive ? 'activity-dot--active' : ''} ${dot.isToday ? 'activity-dot--today' : ''}`}
-                  title={`${dot.title}${dot.isActive ? ' • Debated' : ' • No debate'}${dot.isToday ? ' • Today' : ''}`}
-                >
-                  {dot.label}
-                </div>
-              ))}
-            </div>
-          </div>
+          {/* Premium Activity Heat Map */}
+          <ActivityHeatMap history={history} />
 
           {/* Daily Challenge */}
           <div className="daily-challenge">

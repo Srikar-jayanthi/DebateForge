@@ -25,12 +25,22 @@ body {
   text-size-adjust: 100%;
   background-color: var(--bg-primary);
   color: var(--text-primary);
+}
+
+html {
+  scroll-behavior: smooth;
   overflow-x: hidden;
 }
 
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
+}
+
+.main-content {
+  position: relative;
+  width: 100%;
+  overflow: visible;
 }
 
 .main-content--with-navbar {

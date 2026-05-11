@@ -46,21 +46,25 @@ function updateStreak(user, tzOffsetMinutes = 0) {
   const todayStr = getTodayString(tzOffsetMinutes);
   const lastStr  = toDateString(user.streak?.lastDebateDate);
 
+  // Initialize streak object if it doesn't exist
+  if (!user.streak) {
+    user.streak = { current: 0, longest: 0, lastDebateDate: null, freezeUsed: false };
+  }
+
   const result = {
     streakUpdated:    false,
-    newStreak:        user.streak?.current || 0,
+    newStreak:        user.streak.current || 0,
     milestoneReached: null,
     freezeUsed:       false,
   };
 
   if (!lastStr) {
-    // First debate ever
-    user.streak = {
-      current:        1,
-      longest:        1,
-      lastDebateDate: new Date(todayStr + 'T00:00:00Z'),
-      freezeUsed:     false,
-    };
+    // First debate ever or first in a long time
+    user.streak.current = 1;
+    user.streak.lastDebateDate = new Date(todayStr + 'T00:00:00Z');
+    if (user.streak.current > (user.streak.longest || 0)) {
+      user.streak.longest = user.streak.current;
+    }
     result.streakUpdated = true;
     result.newStreak = 1;
     return result;
@@ -69,7 +73,12 @@ function updateStreak(user, tzOffsetMinutes = 0) {
   const diffDays = daysBetween(todayStr, lastStr);
 
   if (diffDays === 0) {
-    // Already debated on this calendar day — no change
+    // Already debated on this calendar day — ensuring we at least have a 1 if they just started
+    if (user.streak.current === 0) {
+       user.streak.current = 1;
+       result.streakUpdated = true;
+       result.newStreak = 1;
+    }
     return result;
   }
 
@@ -83,7 +92,7 @@ function updateStreak(user, tzOffsetMinutes = 0) {
   } else if (diffDays === 2 && !user.streak.freezeUsed) {
     // Missed exactly 1 day → use freeze
     user.streak.freezeUsed = true;
-    user.streak.current += 1;
+    user.streak.current += 1; // Count today
     user.streak.lastDebateDate = new Date(todayStr + 'T00:00:00Z');
     result.streakUpdated = true;
     result.newStreak = user.streak.current;

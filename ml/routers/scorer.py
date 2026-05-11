@@ -11,6 +11,23 @@ try:
 except ImportError:  # pragma: no cover - optional
     textstat = None
 
+import nltk
+from nltk.tokenize import word_tokenize
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt')
+try:
+    nltk.data.find('tokenizers/punkt_tab')
+except LookupError:
+    nltk.download('punkt_tab')
+
+import spacy
+try:
+    nlp = spacy.load("en_core_web_sm")
+except Exception:
+    nlp = None
+
 
 router = APIRouter(tags=["scorer"])
 
@@ -192,7 +209,25 @@ def extract_features(argument: str, topic: str, context: List[str]):
 
     evidence_score = _clamp(evidence_score + random.uniform(-5, 5))
 
-    # CLARITY FEATURES
+    # ── ADVANCED NLP FEATURES (NLTK & SpaCy) ──
+    # Lexical Diversity (NLTK)
+    tokens = word_tokenize(argument)
+    lexical_diversity = len(set(tokens)) / len(tokens) if tokens else 0
+
+    # Entity Density (SpaCy)
+    entity_boost = 0
+    if nlp:
+        doc = nlp(argument)
+        entity_count = len(doc.ents)
+        entity_boost = min(15, entity_count * 3) # boost for citing names, places, dates
+
+    logic_score = _clamp(logic_score + entity_boost * 0.4)
+    evidence_score = _clamp(evidence_score + entity_boost * 0.6)
+    
+    # Final weight adjustments
+    logic_score = _clamp(logic_score + lexical_diversity * 10)
+
+    # ── CLARITY FEATURES ──
     if textstat is not None:
         try:
             flesch = float(textstat.flesch_reading_ease(argument))

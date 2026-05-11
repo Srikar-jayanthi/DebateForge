@@ -792,9 +792,8 @@ export default function DebateRoomPage() {
                 onChange={(e) => {
                   const newLang = e.target.value;
                   setDebateLanguage(newLang);
-                  if (socketRef.current) {
-                    socketRef.current.emit('set_language', { debateId, language: newLang });
-                  }
+                  // setLanguage is exposed by the hook and calls socket.emit('set_language') internally
+                  setLanguage(newLang === 'auto' ? null : newLang);
                 }}
                 disabled={phase !== 'user_turn' || judgeVerdict}
                 aria-label="Debate language"
@@ -853,16 +852,14 @@ export default function DebateRoomPage() {
                             className="voice-play-btn"
                             onClick={(e) => {
                               e.stopPropagation();
-                              // Request high-quality TTS from the server
-                              if (socketRef.current) {
-                                socketRef.current.emit('request_tts', { 
-                                  debateId, 
-                                  text: msg.text || msg.content || '',
-                                  lang: (debateLanguage === 'auto' || !debateLanguage) ? 'te' : debateLanguage
-                                });
+                              // TTS replay: use browser speech synthesis as a fallback
+                              if (msg.text && window.speechSynthesis) {
+                                window.speechSynthesis.cancel();
+                                const utt = new SpeechSynthesisUtterance(msg.text);
+                                window.speechSynthesis.speak(utt);
                               }
                             }}
-                            title="Play AI Voice"
+                            title="Replay AI Voice"
                             style={{ cursor: 'pointer', zIndex: 10 }}
                           >
                             🔊

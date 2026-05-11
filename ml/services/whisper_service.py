@@ -5,14 +5,34 @@ import re
 import tempfile
 import time
 
-import google.generativeai as genai
-
 # ── Toggle: local Whisper vs Gemini API ──
 USE_LOCAL_STT = os.getenv("USE_LOCAL_STT", "false").lower() == "true"
 
-# Configure Gemini (only if using API mode)
-if not USE_LOCAL_STT:
-    genai.configure(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("OPENAI_API_KEY"))
+# ── Gemini client (new SDK, lazy init) ──
+_gemini_client = None
+
+def _get_gemini_client():
+    global _gemini_client
+    if _gemini_client is not None:
+        return _gemini_client
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        # Try new google-genai SDK first
+        from google import genai as _genai
+        _gemini_client = _genai.Client(api_key=api_key)
+        logging.info("[WHISPER] Using google-genai SDK")
+    except ImportError:
+        try:
+            # Fall back to legacy google-generativeai
+            import google.generativeai as _legacy
+            _legacy.configure(api_key=api_key)
+            _gemini_client = _legacy
+            logging.info("[WHISPER] Using legacy google-generativeai SDK")
+        except ImportError:
+            logging.warning("[WHISPER] No Gemini SDK found — voice transcription via Gemini disabled")
+    return _gemini_client
 
 # ── Local Whisper model (lazy singleton) ──
 _whisper_model = None
@@ -94,11 +114,15 @@ async def _transcribe_gemini(audio_bytes: bytes, topic: str = "") -> dict:
     """Transcribe using Google Gemini API with language detection."""
     start = time.time()
 
+    client = _get_gemini_client()
+    if not client:
+        return {
+            "text": "", "language": "en", "duration_ms": 0,
+            "word_count": 0, "success": False,
+            "error": "Gemini SDK not available",
+        }
+
     try:
-        model = genai.GenerativeModel("gemini-flash-latest")
-
-        audio_part = {"mime_type": "audio/webm", "data": audio_bytes}
-
         prompt = (
             f"Transcribe this audio. Context: This is a formal debate argument about: {topic}. "
             "Also detect the spoken language. "
@@ -112,8 +136,23 @@ async def _transcribe_gemini(audio_bytes: bytes, topic: str = "") -> dict:
                  "TEXT: <transcribed text>"
         )
 
-        response = await model.generate_content_async([prompt, audio_part])
-        raw_text = response.text.strip()
+        # Support both new google-genai and legacy google-generativeai
+        if hasattr(client, 'aio'):  # new SDK
+            from google.genai import types as _gtypes
+            response = await client.aio.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[
+                    _gtypes.Part.from_bytes(data=audio_bytes, mime_type="audio/webm"),
+                    prompt,
+                ],
+            )
+            raw_text = response.text.strip()
+        else:  # legacy SDK
+            model_obj = client.GenerativeModel("gemini-1.5-flash")
+            audio_part = {"mime_type": "audio/webm", "data": audio_bytes}
+            response = await model_obj.generate_content_async([prompt, audio_part])
+            raw_text = response.text.strip()
+
 
         # Parse LANG: and TEXT: from response
         detected_lang = "en"
