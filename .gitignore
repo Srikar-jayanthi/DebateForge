@@ -44,7 +44,7 @@ frontend/test*.js
 
 
 
-render.yaml
+# render.yaml removed from ignore
 
 # Environment files
 backend/.env

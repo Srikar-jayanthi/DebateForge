@@ -1,0 +1,75 @@
+services:
+  # ── Backend API (Node.js + Express) ──────────────────────
+  - type: web
+    name: debateforge-backend
+    runtime: node
+    plan: free
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5001
+      - key: MONGODB_URI
+        sync: false          # Set in Render dashboard
+      - key: JWT_SECRET
+        sync: false          # Set in Render dashboard
+      - key: JWT_EXPIRY
+        value: 1d
+      - key: GEMINI_API_KEY
+        sync: false          # Set in Render dashboard
+      - key: GROQ_API_KEY
+        sync: false          # Set in Render dashboard
+      - key: ELEVENLABS_API_KEY
+        sync: false          # Set in Render dashboard
+      - key: ELEVENLABS_VOICE_ID
+        value: i43IkvDdcl0HXXIl6t0P
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false          # Set in Render dashboard
+      - key: SMTP_PASS
+        sync: false          # Set in Render dashboard
+      - key: ML_SERVICE_URL
+        fromService:
+          name: debateforge-ml
+          type: web
+          property: host
+      - key: FRONTEND_URL
+        sync: false          # Set to your Vercel URL after frontend deploy
+      - key: LOGIN_MAX_ATTEMPTS
+        value: "5"
+      - key: LOGIN_LOCKOUT_MINUTES
+        value: "15"
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_EMAIL
+        value: mailto:admin@debateforge.com
+
+  # ── ML Microservice (Python + FastAPI) ───────────────────
+  - type: web
+    name: debateforge-ml
+    runtime: python
+    plan: free
+    rootDir: ml
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false          # Set in Render dashboard
+      - key: FRONTEND_URL
+        sync: false          # Set to your Vercel URL
+      - key: USE_LOCAL_STT
+        value: "false"
+      - key: USE_LOCAL_TTS
+        value: "false"
+      - key: USE_LOCAL_MEMORY
+        value: "false"
