@@ -18,14 +18,14 @@ import '../styles/streak.css';
    Static achievements catalogue
 ────────────────────────────────────────── */
 const ACHIEVEMENTS = [
-  { id: 'first_blood',  icon: '⚔️',  name: 'First Blood',      desc: 'Win your first debate',       min: 1  },
-  { id: 'sharp_mind',  icon: '🧠',  name: 'Sharp Mind',        desc: 'Avg logic score > 80',        min: 10 },
-  { id: 'no_fallacy',  icon: '🛡️',  name: 'Iron Logic',        desc: '5 debates, 0 fallacies',      min: 5  },
-  { id: 'speed_demon', icon: '⚡',  name: 'Speed Demon',       desc: 'Answer in under 10s',         min: 1  },
-  { id: 'veteran',     icon: '🏆',  name: 'Veteran',           desc: '50 debates completed',        min: 50 },
-  { id: 'polymath',    icon: '🌐',  name: 'Polymath',          desc: 'Debate in 5 categories',      min: 5  },
-  { id: 'devil',       icon: '😈',  name: "Devil's Advocate",  desc: 'Win a Devil mode debate',     min: 1  },
-  { id: 'expert',      icon: '🔥',  name: 'Expert Debater',    desc: 'Win 10 Expert debates',       min: 10 },
+  { id: 'first_blood', icon: '⚔️', name: 'First Blood', desc: 'Win your first debate', min: 1 },
+  { id: 'sharp_mind', icon: '🧠', name: 'Sharp Mind', desc: 'Avg logic score > 80', min: 10 },
+  { id: 'no_fallacy', icon: '🛡️', name: 'Iron Logic', desc: '5 debates, 0 fallacies', min: 5 },
+  { id: 'speed_demon', icon: '⚡', name: 'Speed Demon', desc: 'Answer in under 10s', min: 1 },
+  { id: 'veteran', icon: '🏆', name: 'Veteran', desc: '50 debates completed', min: 50 },
+  { id: 'polymath', icon: '🌐', name: 'Polymath', desc: 'Debate in 5 categories', min: 5 },
+  { id: 'devil', icon: '😈', name: "Devil's Advocate", desc: 'Win a Devil mode debate', min: 1 },
+  { id: 'expert', icon: '🔥', name: 'Expert Debater', desc: 'Win 10 Expert debates', min: 10 },
 ];
 
 /* ──────────────────────────────────────────
@@ -67,7 +67,7 @@ function Trend({ value }) {
 ────────────────────────────────────────── */
 function ResultPill({ result }) {
   const map = {
-    win:  { label: 'Win',  cls: 'pill--win'  },
+    win: { label: 'Win', cls: 'pill--win' },
     loss: { label: 'Loss', cls: 'pill--loss' },
     draw: { label: 'Draw', cls: 'pill--draw' },
   };
@@ -125,13 +125,13 @@ export default function DashboardPage() {
     const base = import.meta.env.VITE_API_URL;
 
     Promise.allSettled([
-      axios.get('/api/profile/me',                   { baseURL: base, headers }),
-      axios.get('/api/profile/fallacies',            { baseURL: base, headers }),
-      axios.get('/api/debates/history?limit=20',     { baseURL: base, headers }),
+      axios.get('/api/profile/me', { baseURL: base, headers }),
+      axios.get('/api/profile/fallacies', { baseURL: base, headers }),
+      axios.get('/api/debates/history?limit=20', { baseURL: base, headers }),
     ]).then(([prof, fall, hist]) => {
-      if (prof.status  === 'fulfilled') setProfile(prof.value.data);
-      if (fall.status  === 'fulfilled') setFallacies(fall.value.data?.fallacies ?? fall.value.data ?? []);
-      if (hist.status  === 'fulfilled') setHistory(hist.value.data?.debates     ?? hist.value.data ?? []);
+      if (prof.status === 'fulfilled') setProfile(prof.value.data);
+      if (fall.status === 'fulfilled') setFallacies(fall.value.data?.fallacies ?? fall.value.data ?? []);
+      if (hist.status === 'fulfilled') setHistory(hist.value.data?.debates ?? hist.value.data ?? []);
       setLoading(false);
     });
   };
@@ -140,17 +140,17 @@ export default function DashboardPage() {
     fetchData();
     window.addEventListener('focus', fetchData);
     return () => window.removeEventListener('focus', fetchData);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
   /* ── derived stats ── */
-  const historyWins  = history.filter(d => d.winner === 'user').length;
+  const historyWins = history.filter(d => d.winner === 'user').length;
   const totalDebates = profile?.stats?.totalDebates ?? profile?.totalDebates ?? history.length;
-  const wins         = (profile?.user?.wins > 0) ? profile.user.wins : historyWins;
-  const winRate      = totalDebates > 0 ? Math.round((wins / totalDebates) * 100) : 0;
-  const avgScore     = Math.round(profile?.stats?.avgScore ?? profile?.avgScore ?? 0);
-  const elo          = profile?.user?.eloRating ?? profile?.elo ?? user?.elo ?? 1000;
-  const streakData   = profile?.user?.streak || user?.streak || { current: 0, longest: 0, freezeUsed: false };
+  const wins = (profile?.user?.wins > 0) ? profile.user.wins : historyWins;
+  const winRate = totalDebates > 0 ? Math.round((wins / totalDebates) * 100) : 0;
+  const avgScore = Math.round(profile?.stats?.avgScore ?? profile?.avgScore ?? 0);
+  const elo = profile?.user?.eloRating ?? profile?.elo ?? user?.elo ?? 1000;
+  const streakData = profile?.user?.streak || user?.streak || { current: 0, longest: 0, freezeUsed: false };
 
   // The ActivityHeatMap component handles logic internally now.
 
@@ -164,10 +164,10 @@ export default function DashboardPage() {
   const trendData = history.slice().reverse().map((d, i) => {
     const final = d.userFinalScore || 0;
     return {
-      n:        i + 1,
-      Logic:    d.scores?.logic    || final,
+      n: i + 1,
+      Logic: d.scores?.logic || final,
       Evidence: d.scores?.evidence || final,
-      Clarity:  d.scores?.clarity  || final,
+      Clarity: d.scores?.clarity || final,
     };
   });
 
@@ -204,7 +204,7 @@ export default function DashboardPage() {
       <section className="dash-section">
         <div className="stats-row">
           {loading ? (
-            [0,1,2,3].map((i) => <StatCardSkeleton key={i} />)
+            [0, 1, 2, 3].map((i) => <StatCardSkeleton key={i} />)
           ) : (
             <>
               <div className="stat-card">
@@ -272,8 +272,8 @@ export default function DashboardPage() {
           <Skeleton height={320} radius={12} />
         ) : radarData.length === 0 ? (
           <div className="dash-empty">
-            {totalDebates > 0 
-              ? "No fallacies detected yet — Keep your logic sharp!" 
+            {totalDebates > 0
+              ? "No fallacies detected yet — Keep your logic sharp!"
               : "Complete more debates to see your fallacy profile"}
           </div>
         ) : (
@@ -386,9 +386,9 @@ export default function DashboardPage() {
                 <Legend
                   wrapperStyle={{ fontSize: 12, paddingTop: 12, color: 'rgba(255,255,255,0.5)' }}
                 />
-                <Line type="monotone" dataKey="Logic"    stroke="#00FF87" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="Logic" stroke="#00FF87" strokeWidth={2} dot={false} />
                 <Line type="monotone" dataKey="Evidence" stroke="#00AAFF" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="Clarity"  stroke="#FFCC00" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="Clarity" stroke="#FFCC00" strokeWidth={2} dot={false} />
               </LineChart>
             </ResponsiveContainer>
           </div>
