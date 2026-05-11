@@ -30,20 +30,15 @@ const IS_PROD = NODE_ENV === 'production';
 const app = express();
 const server = http.createServer(app);
 
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  // Explicitly allow your Vercel origin or any origin if in 'wildcard' mode
-  res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
+app.use(cors({
+  origin: true,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
+}));
 
-  // Instantly respond to preflight requests
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  next();
-});
+// Ensure preflight works
+app.options('*', cors());
 
 /* ═══════════════════════════════════════════
    0. STARTUP ENVIRONMENT VALIDATION
