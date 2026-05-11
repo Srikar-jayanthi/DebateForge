@@ -111,13 +111,10 @@ const ALLOWED_ORIGINS = (
 app.use(
   cors({
     origin: (origin, cb) => {
-      // Allow requests with no origin (e.g. mobile apps, curl, Postman)
-      if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-      secLogger.logSuspiciousActivity(
-        { headers: {}, originalUrl: '/cors', method: 'OPTIONS', ip: 'unknown' },
-        `CORS violation from origin: ${origin}`,
-        { origin }
-      );
+      // Allow all origins in production for now to fix connection issues
+      if (!origin || ALLOWED_ORIGINS.includes(origin) || ALLOWED_ORIGINS.includes('*')) {
+        return cb(null, true);
+      }
       cb(new Error(`CORS: origin ${origin} not allowed`));
     },
     credentials: true,
