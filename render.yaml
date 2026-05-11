@@ -60,7 +60,7 @@ services:
     plan: free
     rootDir: ml
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn main:app --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 120
+    startCommand: python -m uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
       - key: GEMINI_API_KEY
