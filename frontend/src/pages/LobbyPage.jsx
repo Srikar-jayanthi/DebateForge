@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import '../styles/lobby.css';
 import '../styles/lobby-format.css';
 
-const API = process.env.REACT_APP_API_URL || 'http://127.0.0.1:5001';
+const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001';
 
 const CATEGORIES = [
   'All',

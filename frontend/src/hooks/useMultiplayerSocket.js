@@ -38,7 +38,7 @@ export function useMultiplayerSocket(roomId, { onEvent } = {}) {
   useEffect(() => {
     if (!roomId) return;
 
-    const baseUrl = process.env.REACT_APP_WS_URL || process.env.REACT_APP_API_URL || '';
+    const baseUrl = process.env.REACT_APP_WS_URL || import.meta.env.VITE_API_URL || '';
     const socket = io(`${baseUrl}/multiplayer`, {
       transports: ['websocket'],
       auth: {

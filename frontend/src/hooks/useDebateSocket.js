@@ -86,7 +86,7 @@ export function useDebateSocket(debateId, { onEvent, selectedVoiceURI, preferred
 
   function resolveSocketUrl() {
     const wsUrl = String(process.env.REACT_APP_WS_URL || '').trim();
-    const apiUrl = String(process.env.REACT_APP_API_URL || '').trim();
+    const apiUrl = String(import.meta.env.VITE_API_URL || '').trim();
 
     if (typeof window === 'undefined') {
       return wsUrl || apiUrl || '';

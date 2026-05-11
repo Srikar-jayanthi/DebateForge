@@ -57,7 +57,7 @@ export default function LeaderboardPage() {
     setLoading(true);
     axios
       .get('/api/profile/leaderboard', {
-        baseURL: process.env.REACT_APP_API_URL,
+        baseURL: import.meta.env.VITE_API_URL,
         headers: { Authorization: `Bearer ${token}` },
       })
       .then((res) => {

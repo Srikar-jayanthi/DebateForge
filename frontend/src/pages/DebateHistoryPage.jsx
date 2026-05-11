@@ -4,7 +4,7 @@ import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import '../styles/theme.css';
 
-const API = process.env.REACT_APP_API_URL;
+const API = import.meta.env.VITE_API_URL;
 
 /* ══════════════════════════════════════════════════════════
    generateReportHTML — standalone report card for history

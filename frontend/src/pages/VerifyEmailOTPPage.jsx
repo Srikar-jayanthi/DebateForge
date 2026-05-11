@@ -33,7 +33,7 @@ export default function VerifyEmailOTPPage() {
       const res = await axios.post(
         '/api/auth/verify-email-otp',
         { email, otp },
-        { baseURL: process.env.REACT_APP_API_URL || 'http://localhost:5001' }
+        { baseURL: import.meta.env.VITE_API_URL || 'http://localhost:5001' }
       );
       setStatus('success');
       setMessage(res.data.message || 'Email verified successfully!');
@@ -68,7 +68,7 @@ export default function VerifyEmailOTPPage() {
         '/api/auth/resend-verification-otp',
         {},
         {
-          baseURL: process.env.REACT_APP_API_URL || 'http://localhost:5001',
+          baseURL: import.meta.env.VITE_API_URL || 'http://localhost:5001',
           headers: { Authorization: `Bearer ${token}` }
         }
       );

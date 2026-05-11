@@ -122,7 +122,7 @@ export default function DashboardPage() {
   const fetchData = () => {
     if (!token) return;
     const headers = { Authorization: `Bearer ${token}` };
-    const base = process.env.REACT_APP_API_URL;
+    const base = import.meta.env.VITE_API_URL;
 
     Promise.allSettled([
       axios.get('/api/profile/me',                   { baseURL: base, headers }),

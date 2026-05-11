@@ -540,7 +540,7 @@ export default function DebateRoomPage() {
     if (!debateId) return;
     axios
       .get(`/api/debates/${debateId}`, {
-        baseURL: process.env.REACT_APP_API_URL,
+        baseURL: import.meta.env.VITE_API_URL,
         headers: { Authorization: `Bearer ${token}` },
       })
       .then((r) => setDebateInfo(r.data?.debate ?? r.data))

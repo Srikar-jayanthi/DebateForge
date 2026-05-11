@@ -22,7 +22,7 @@ export function AuthProvider({ children }) {
 
     axios
       .get('/api/auth/me', {
-        baseURL: process.env.REACT_APP_API_URL || 'http://127.0.0.1:5001',
+        baseURL: import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001',
         headers: {
           Authorization: `Bearer ${storedToken}`,
         },

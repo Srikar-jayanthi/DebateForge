@@ -52,7 +52,7 @@ export default function Navbar() {
             <div className="nav-avatar">
               {user.profilePicUrl ? (
                 <img 
-                  src={`${process.env.REACT_APP_API_URL || 'http://127.0.0.1:5001'}${user.profilePicUrl}`} 
+                  src={`${import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001'}${user.profilePicUrl}`} 
                   alt="Avatar" 
                   crossOrigin="anonymous"
                 />
