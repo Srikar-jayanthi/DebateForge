@@ -59,7 +59,7 @@ class CoachingPlanResponse(BaseModel):
 FAISS_DIR = os.path.join(os.path.dirname(__file__), "..", "faiss_data")
 os.makedirs(FAISS_DIR, exist_ok=True)
 
-DIMENSION = 384  # all-MiniLM-L6-v2 output dimension
+DIMENSION = 768  # Gemini models/embedding-001 output dimension
 
 
 def get_user_index(user_id: str):
@@ -126,9 +126,6 @@ def _get_index():
 
 @router.post("/store")
 async def store_argument(payload: StoreRequest):
-    if not model_store.sentence_model:
-        return {"stored": False}
-
     if USE_LOCAL_MEMORY:
         return await _store_faiss(payload)
     else:
@@ -141,9 +138,9 @@ async def _store_faiss(payload: StoreRequest):
         return {"stored": False, "error": "faiss-cpu not installed"}
 
     try:
-        embedding = model_store.sentence_model.encode(
-            [payload.argument_text], convert_to_numpy=True
-        )[0].astype("float32").reshape(1, -1)
+        from services.embedding_service import get_embedding
+        embedding_list = await get_embedding(payload.argument_text)
+        embedding = np.array(embedding_list).astype("float32").reshape(1, -1)
 
         # Normalize for cosine similarity
         faiss.normalize_L2(embedding)
@@ -185,9 +182,9 @@ async def _store_pinecone(payload: StoreRequest):
         return {"stored": False}
 
     try:
-        embedding = model_store.sentence_model.encode(
-            [payload.argument_text], convert_to_numpy=True
-        )[0]
+        from services.embedding_service import get_embedding
+        embedding_list = await get_embedding(payload.argument_text)
+        embedding = np.array(embedding_list)
         timestamp = int(time.time())
         user_id = payload.user_id
         debate_id = payload.debate_id

@@ -334,24 +334,23 @@ def _rule_based_detection(text: str) -> Optional[Tuple[str, float, str]]:
   return best  # (fallacy_type, confidence, triggered_phrase)
 
 
-def _ensure_example_embeddings() -> None:
-  if not model_store.sentence_model or _example_embeddings:
+async def _ensure_example_embeddings():
+  if _example_embeddings:
     return
 
-  model = model_store.sentence_model
+  from services.embedding_service import get_embeddings
+  
   for fallacy, examples in FALLACY_EXAMPLES.items():
-    embeddings = model.encode(examples, convert_to_numpy=True)
+    embeddings = await get_embeddings(examples)
     _example_embeddings[fallacy] = np.mean(embeddings, axis=0)
 
 
-def _semantic_detection(text: str) -> Optional[Tuple[str, float, str]]:
-  if not model_store.sentence_model:
-    return None
+async def _semantic_detection(text: str) -> Optional[Tuple[str, float, str]]:
+  await _ensure_example_embeddings()
 
-  _ensure_example_embeddings()
-
-  model = model_store.sentence_model
-  arg_emb = model.encode([text], convert_to_numpy=True)[0]
+  from services.embedding_service import get_embedding
+  arg_emb_list = await get_embedding(text)
+  arg_emb = np.array(arg_emb_list)
 
   best_type: Optional[str] = None
   best_conf: float = 0.0
@@ -445,7 +444,7 @@ async def detect_fallacy(payload: FallacyRequest) -> FallacyResponse:
         )
 
   # Layer 2: semantic similarity (if rule-based is weak or absent)
-  semantic_result = _semantic_detection(argument_text)
+  semantic_result = await _semantic_detection(argument_text)
   if semantic_result:
     fallacy_type, conf, phrase = semantic_result
     if conf >= SEMANTIC_THRESHOLD:
