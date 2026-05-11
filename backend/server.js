@@ -78,19 +78,22 @@ for (const key of RECOMMENDED_ENV) {
   }
 }
 
+// Handle Preflight OPTIONS requests explicitly
+app.options('*', cors());
+
+// Hide Express fingerprint
+app.disable('x-powered-by');
+
 /* ═══════════════════════════════════════════
    1. SECURITY HEADERS (Helmet)
-   — Prevents clickjacking, XSS, MIME sniffing,
-     and hides server identity
+   — Moved AFTER CORS to prevent header conflicts
 ═══════════════════════════════════════════ */
 app.use(helmet({
-  contentSecurityPolicy: false,       // Let frontend handle CSP
-  crossOriginEmbedderPolicy: false,   // Allow cross-origin audio/images
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: { policy: "cross-origin" },
   hsts: IS_PROD ? { maxAge: 31536000, includeSubDomains: true, preload: true } : false,
 }));
-
-// Hide Express fingerprint — makes it harder for bots to identify the stack
-app.disable('x-powered-by');
 
 /* ═══════════════════════════════════════════
    1a. HTTPS ENFORCEMENT (production only)
