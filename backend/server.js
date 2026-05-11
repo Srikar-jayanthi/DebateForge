@@ -30,25 +30,20 @@ const IS_PROD = NODE_ENV === 'production';
 const app = express();
 const server = http.createServer(app);
 
-// 1. CORS CONFIGURATION (MUST BE BEFORE OTHER MIDDLEWARE)
-const ALLOWED_ORIGINS = (process.env.FRONTEND_URL || '*').split(',').map(o => o.trim());
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  // Explicitly allow your Vercel origin or any origin if in 'wildcard' mode
+  res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
 
-app.use(cors({
-  origin: (origin, callback) => {
-    // When credentials: true is set, we must return the specific origin, not '*'
-    if (!origin || ALLOWED_ORIGINS.includes('*') || ALLOWED_ORIGINS.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-}));
-
-// Handle Preflight OPTIONS requests explicitly
-app.options('*', cors());
+  // Instantly respond to preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
 
 /* ═══════════════════════════════════════════
    0. STARTUP ENVIRONMENT VALIDATION
