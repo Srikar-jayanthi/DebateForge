@@ -488,24 +488,37 @@ async function verifyEmailOTP(req, res) {
 ═══════════════════════════════════════════ */
 async function resendVerificationOTP(req, res) {
   try {
-    const user = await User.findById(req.user.id);
+    const { email } = req.body;
+
+    if (!email || !isValidEmail(email)) {
+      return res.status(400).json({ error: 'Valid email is required' });
+    }
+
+    const user = await User.findOne({ email });
 
     if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      // Return success even if not found to prevent email enumeration
+      return res.status(200).json({ message: 'If an account exists, a new OTP has been sent' });
     }
 
     if (user.emailVerified) {
-      return res.status(400).json({ message: 'Email already verified' });
+      return res.status(400).json({ error: 'Email already verified. Please log in.' });
     }
 
     const verificationOTP = user.createEmailVerificationOTP();
     await user.save();
 
-    await sendVerificationEmail(user.email, verificationOTP);
+    console.log(`🔄 Resending OTP to ${email}: ${verificationOTP}`);
+    
+    // Send email (non-blocking)
+    setImmediate(() => {
+      sendVerificationEmail(email, verificationOTP).catch((err) => {
+        console.error('❌ Background resend failed:', err.message);
+      });
+    });
 
-    return res.status(200).json({ message: 'Verification OTP sent' });
+    return res.status(200).json({ message: 'A new verification OTP has been sent to your email.' });
   } catch (error) {
-    // eslint-disable-next-line no-console
     console.error('Error in resendVerificationOTP controller:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }

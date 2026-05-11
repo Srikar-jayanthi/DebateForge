@@ -21,11 +21,11 @@ router.post('/login', login);
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password/:token', resetPassword);
 router.post('/verify-email-otp', verifyEmailOTP);
+router.post('/resend-verification-otp', resendVerificationOTP);
 
 /* ── Protected routes ── */
 router.get('/me', protect, getMe);
 router.post('/refresh', protect, refresh);
 router.post('/change-password', protect, changePassword);
-router.post('/resend-verification-otp', protect, resendVerificationOTP);
 
 module.exports = router;
