@@ -137,6 +137,8 @@ async function register(req, res) {
         console.log(`❌ Email already registered and verified: ${email}`);
         return res.status(409).json({ error: 'Email already registered and verified' });
       }
+    } 
+
     console.log(`📝 Hashing password for ${email}...`);
     const passwordHash = await bcrypt.hash(password, 12);
 
