@@ -30,6 +30,26 @@ const IS_PROD = NODE_ENV === 'production';
 const app = express();
 const server = http.createServer(app);
 
+// 1. CORS CONFIGURATION (MUST BE BEFORE OTHER MIDDLEWARE)
+const ALLOWED_ORIGINS = (process.env.FRONTEND_URL || '*').split(',').map(o => o.trim());
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // When credentials: true is set, we must return the specific origin, not '*'
+    if (!origin || ALLOWED_ORIGINS.includes('*') || ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+}));
+
+// Handle Preflight OPTIONS requests explicitly
+app.options('*', cors());
+
 /* ═══════════════════════════════════════════
    0. STARTUP ENVIRONMENT VALIDATION
    — Fail fast if critical secrets are missing
@@ -99,27 +119,6 @@ app.use((req, _res, next) => {
     || `${Date.now()}-${requestCounter}`;
   next();
 });
-
-/* ═══════════════════════════════════════════
-   2. CORS — only allow trusted origins
-═══════════════════════════════════════════ */
-const ALLOWED_ORIGINS = (
-  process.env.FRONTEND_URL ||
-  'http://localhost:3000'
-).split(',').map((o) => o.trim());
-
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      // Allow all origins in production for now to fix connection issues
-      if (!origin || ALLOWED_ORIGINS.includes(origin) || ALLOWED_ORIGINS.includes('*')) {
-        return cb(null, true);
-      }
-      cb(new Error(`CORS: origin ${origin} not allowed`));
-    },
-    credentials: true,
-  })
-);
 
 /* ═══════════════════════════════════════════
    3. BODY PARSING — limit payload sizes to
