@@ -65,9 +65,10 @@ The ML services require high-performance GPU or high-threaded CPU for Whisper.
 ### Steps
 1.  Navigate to `ml/`
 2.  Install dependencies: `pip install -r requirements.txt`
-3.  Run using a production WSGI server like `Gunicorn`:
+3.  Run using a production ASGI server like `Uvicorn`:
     ```bash
-    gunicorn --workers 4 --bind 0.0.0.0:8000 main:app
+    # For Render/Cloud (automatically uses dynamic port)
+    uvicorn main:app --host 0.0.0.0 --port $PORT
     ```
 
 ---

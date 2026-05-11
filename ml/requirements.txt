@@ -31,3 +31,5 @@ h11
 click
 colorama; sys_platform == 'win32'
 greenlet; python_version >= '3'
+google-genai
+google-generativeai

@@ -13,20 +13,36 @@ except ImportError:  # pragma: no cover - optional
 
 import nltk
 from nltk.tokenize import word_tokenize
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt')
-try:
-    nltk.data.find('tokenizers/punkt_tab')
-except LookupError:
-    nltk.download('punkt_tab')
+
+def initialize_nltk():
+    """Download NLTK data if missing."""
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt')
+    try:
+        nltk.data.find('tokenizers/punkt_tab')
+    except LookupError:
+        nltk.download('punkt_tab')
 
 import spacy
-try:
-    nlp = spacy.load("en_core_web_sm")
-except Exception:
-    nlp = None
+nlp = None
+
+def get_nlp():
+    """Lazy-load SpaCy model."""
+    global nlp
+    if nlp is None:
+        try:
+            nlp = spacy.load("en_core_web_sm")
+        except Exception:
+            # Try to download if missing (not recommended for production but good for fallback)
+            try:
+                import os
+                os.system("python -m spacy download en_core_web_sm")
+                nlp = spacy.load("en_core_web_sm")
+            except:
+                nlp = None
+    return nlp
 
 
 router = APIRouter(tags=["scorer"])
@@ -216,8 +232,9 @@ def extract_features(argument: str, topic: str, context: List[str]):
 
     # Entity Density (SpaCy)
     entity_boost = 0
-    if nlp:
-        doc = nlp(argument)
+    nlp_model = get_nlp()
+    if nlp_model:
+        doc = nlp_model(argument)
         entity_count = len(doc.ents)
         entity_boost = min(15, entity_count * 3) # boost for citing names, places, dates
 

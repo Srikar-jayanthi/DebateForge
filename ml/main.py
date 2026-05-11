@@ -29,30 +29,32 @@ app.add_middleware(
 )
 
 
-@app.on_event("startup")
-async def startup_event() -> None:
-    # Load sentence transformer
+import asyncio
+
+# Global flag to track if initialization is done
+initialization_complete = False
+
+async def background_initialization():
+    global initialization_complete
+    print("Starting background initialization...")
+    
+    # 1. Initialize NLTK (downloads data if missing)
+    try:
+        from routers.scorer import initialize_nltk
+        initialize_nltk()
+        print("NLTK data ready")
+    except Exception as e:
+        print(f"Error initializing NLTK: {e}")
+
+    # 2. Load sentence transformer
     if SentenceTransformer is not None and model_store.sentence_model is None:
-        model_store.sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
-        print("Sentence transformer loaded")
+        try:
+            model_store.sentence_model = SentenceTransformer("all-MiniLM-L6-v2")
+            print("Sentence transformer loaded")
+        except Exception as e:
+            print(f"Error loading sentence transformer: {e}")
 
-    # Try to load XGBoost or other models if files exist
-    base_dir = Path(__file__).parent
-    logic_path = base_dir / "models" / "logic_model.json"
-    evidence_path = base_dir / "models" / "evidence_model.json"
-    clarity_path = base_dir / "models" / "clarity_model.json"
-
-    if logic_path.exists():
-        # Placeholder for real XGBoost loading
-        model_store.logic_model = str(logic_path)
-
-    if evidence_path.exists():
-        model_store.evidence_model = str(evidence_path)
-
-    if clarity_path.exists():
-        model_store.clarity_model = str(clarity_path)
-
-    # Pre-load local models if toggles are enabled
+    # 3. Pre-load local models if toggles are enabled
     if os.getenv("USE_LOCAL_STT", "false").lower() == "true":
         try:
             from services.whisper_service import get_whisper_model
@@ -67,7 +69,28 @@ async def startup_event() -> None:
         except Exception as e:
             print(f"Local TTS not loaded: {e}")
 
-    print("All models ready")
+    initialization_complete = True
+    print("All background models ready")
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    # Run heavy initialization in the background
+    asyncio.create_task(background_initialization())
+    
+    # Still load lightweight local model paths synchronously
+    base_dir = Path(__file__).parent
+    logic_path = base_dir / "models" / "logic_model.json"
+    evidence_path = base_dir / "models" / "evidence_model.json"
+    clarity_path = base_dir / "models" / "clarity_model.json"
+
+    if logic_path.exists():
+        model_store.logic_model = str(logic_path)
+    if evidence_path.exists():
+        model_store.evidence_model = str(evidence_path)
+    if clarity_path.exists():
+        model_store.clarity_model = str(clarity_path)
+    
+    print("FastAPI server starting up (models loading in background)")
 
 
 app.include_router(fallacy_router, prefix="/fallacy")
@@ -78,8 +101,11 @@ app.include_router(transcription_router, prefix="/transcription")
 
 @app.get("/health")
 async def health():
-    models_loaded = model_store.sentence_model is not None
-    return {"status": "ok", "models_loaded": models_loaded}
+    return {
+        "status": "ok" if initialization_complete else "initializing",
+        "models_ready": initialization_complete,
+        "sentence_model": model_store.sentence_model is not None
+    }
 
 @app.get("/")
 async def root():

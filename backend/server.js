@@ -37,8 +37,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
 }));
 
-// Ensure preflight works
-app.options('*', cors());
+
 
 /* ═══════════════════════════════════════════
    0. STARTUP ENVIRONMENT VALIDATION
@@ -68,8 +67,7 @@ for (const key of RECOMMENDED_ENV) {
   }
 }
 
-// Handle Preflight OPTIONS requests explicitly
-app.options('*', cors());
+
 
 // Hide Express fingerprint
 app.disable('x-powered-by');
