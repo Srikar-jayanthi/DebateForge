@@ -137,10 +137,7 @@ async function register(req, res) {
         console.log(`❌ Email already registered and verified: ${email}`);
         return res.status(409).json({ error: 'Email already registered and verified' });
       }
-    } else {
-      console.log(`✅ No existing user found, proceeding with registration`);
-    }
-
+    console.log(`📝 Hashing password for ${email}...`);
     const passwordHash = await bcrypt.hash(password, 12);
 
     const user = new User({
@@ -151,33 +148,30 @@ async function register(req, res) {
     });
 
     // Generate email verification OTP
-    console.log('\n🔐 ══════════════════════════════════════');
-    console.log(`   📧 Generating OTP for: ${email}`);
     const verificationOTP = user.createEmailVerificationOTP();
-    console.log(`   🔢 Generated OTP: ${verificationOTP}`);
-    console.log(`   ⏰ Expires at: ${new Date(user.emailVerificationOTPExpires).toISOString()}`);
-    console.log('══════════════════════════════════════\n');
     
+    console.log(`💾 Saving user ${email} to database...`);
     await user.save();
+    console.log(`✅ User ${email} saved successfully!`);
 
-    // Send verification email with OTP (non-blocking — don't let email failure block registration)
-    console.log('📧 Triggering email send...');
-    sendVerificationEmail(email, verificationOTP).catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error('Failed to send verification email:', err.message);
+    // Send verification email with OTP (COMPLETELY non-blocking)
+    console.log('📧 Handing off email to background...');
+    setImmediate(() => {
+      sendVerificationEmail(email, verificationOTP).catch((err) => {
+        console.error('❌ Background email failed:', err.message);
+      });
     });
 
     const token = mintToken(user);
-
     secLogger.logRegistration(req, username, email);
 
+    console.log(`🚀 Sending success response for ${email}`);
     return res.status(201).json({
       token,
       user: user.toSafeObject(),
     });
   } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error('Error in register controller:', error);
+    console.error('❌ FATAL in register controller:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
