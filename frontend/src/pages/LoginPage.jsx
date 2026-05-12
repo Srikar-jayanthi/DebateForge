@@ -33,6 +33,11 @@ export default function LoginPage() {
       toast.success('Welcome back!');
       navigate('/lobby');
     } catch (err) {
+      if (err.response?.status === 403 && err.response?.data?.needsVerification) {
+        toast.info('Please verify your email to continue');
+        navigate('/verify-email-otp?email=' + encodeURIComponent(err.response.data.email || email));
+        return;
+      }
       const msg = err.response?.data?.error || err.response?.data?.message || err.message || 'Login failed. Please try again.';
       setError(msg);
       toast.error(msg);
