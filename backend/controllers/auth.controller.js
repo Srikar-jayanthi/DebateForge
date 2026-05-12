@@ -214,6 +214,15 @@ async function login(req, res) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    // BLOCK LOGIN IF NOT VERIFIED
+    if (!user.emailVerified) {
+      return res.status(403).json({ 
+        error: 'Email not verified', 
+        needsVerification: true,
+        email: user.email 
+      });
+    }
+
     /* ── Check DB-level lockout (fallback if Redis was down when lock was set) ── */
     if (user.isLocked()) {
       return res.status(429).json({
@@ -368,6 +377,10 @@ async function forgotPassword(req, res) {
     const user = await User.findOne({ email });
     if (!user) {
       return res.status(200).json({ message: successMsg });
+    }
+
+    if (!user.emailVerified) {
+      return res.status(400).json({ error: 'Cannot reset password for unverified account. Please verify first.' });
     }
 
     const rawToken = user.createPasswordResetToken();
