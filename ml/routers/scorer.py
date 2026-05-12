@@ -29,20 +29,8 @@ import spacy
 nlp = None
 
 def get_nlp():
-    """Lazy-load SpaCy model."""
-    global nlp
-    if nlp is None:
-        try:
-            nlp = spacy.load("en_core_web_sm")
-        except Exception:
-            # Try to download if missing (not recommended for production but good for fallback)
-            try:
-                import os
-                os.system("python -m spacy download en_core_web_sm")
-                nlp = spacy.load("en_core_web_sm")
-            except:
-                nlp = None
-    return nlp
+    """Disabled SpaCy for memory optimization on Render Free Tier."""
+    return None
 
 
 router = APIRouter(tags=["scorer"])
