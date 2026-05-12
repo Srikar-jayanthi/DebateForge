@@ -146,7 +146,7 @@ async function register(req, res) {
       username,
       email,
       passwordHash,
-      emailVerified: true, // Auto-verify for seamless demo
+      emailVerified: false,
     });
 
     // Generate email verification OTP
