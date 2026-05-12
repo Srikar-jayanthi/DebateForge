@@ -59,6 +59,8 @@ async function sendMail({ to, subject, html }) {
     // eslint-disable-next-line no-console
     console.error('❌ Email send failed:', err.message);
     console.error('❌ Error code:', err.code, '| Command:', err.command);
+    if (err.response) console.error('❌ SMTP Response:', err.response);
+    
     // Fallback to console logging
     // eslint-disable-next-line no-console
     console.log('\n📧 ══════════════════════════════════════');

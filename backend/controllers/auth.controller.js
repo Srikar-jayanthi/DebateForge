@@ -146,7 +146,7 @@ async function register(req, res) {
       username,
       email,
       passwordHash,
-      emailVerified: false,
+      emailVerified: true, // AUTO-VERIFY FOR PRESENTATION
     });
 
     // Generate email verification OTP
@@ -212,15 +212,6 @@ async function login(req, res) {
       await incrementLoginAttempts(email);
       secLogger.logLoginFailed(req, email, 'user not found', MAX_LOGIN_ATTEMPTS - (attempts + 1));
       return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    // BLOCK LOGIN IF NOT VERIFIED
-    if (!user.emailVerified) {
-      return res.status(403).json({ 
-        error: 'Email not verified', 
-        needsVerification: true,
-        email: user.email 
-      });
     }
 
     /* ── Check DB-level lockout (fallback if Redis was down when lock was set) ── */
