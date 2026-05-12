@@ -75,8 +75,8 @@ export default function RegisterPage() {
         { baseURL: import.meta.env.VITE_API_URL || 'http://localhost:5001' }
       );
       login(res.data.token, res.data.user);
-      toast.success('Account created! Please check your email for a verification code.');
-      navigate('/verify-email-otp?email=' + encodeURIComponent(email));
+      toast.success('Account created! Welcome to DebateForge.');
+      navigate('/lobby');
     } catch (err) {
       const msg = err.response?.data?.error || err.response?.data?.message || err.message || 'Registration failed. Please try again.';
       setError(msg);
